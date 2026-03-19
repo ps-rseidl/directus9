@@ -5,7 +5,7 @@ import { MockClient } from 'knex-mock-client';
 import type { MockedFunction } from 'vitest';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockAuthorizationUrl, mockCallback } = vi.hoisted(() => {
+const { mockAuthorizationUrl, mockCallback, mockRevoke, mockRefresh, mockUpdateOne } = vi.hoisted(() => {
 	const mockAuthorizationUrl = vi.fn().mockReturnValue('https://provider.example.com/auth?state=mock-challenge');
 
 	const mockCallback = vi.fn().mockResolvedValue({
@@ -19,7 +19,15 @@ const { mockAuthorizationUrl, mockCallback } = vi.hoisted(() => {
 		}),
 	});
 
-	return { mockAuthorizationUrl, mockCallback };
+	const mockRevoke = vi.fn().mockResolvedValue(undefined);
+
+	const mockRefresh = vi.fn().mockResolvedValue({
+		refresh_token: 'mock-new-refresh-token',
+	});
+
+	const mockUpdateOne = vi.fn().mockResolvedValue(undefined);
+
+	return { mockAuthorizationUrl, mockCallback, mockRevoke, mockRefresh, mockUpdateOne };
 });
 
 vi.mock('../../database/index', () => ({
@@ -108,12 +116,16 @@ vi.mock('openid-client', () => {
 		authorizationUrl: any;
 		callback: any;
 		userinfo: any;
+		revoke: any;
+		refresh: any;
 		issuer: any;
 
 		constructor() {
 			this.authorizationUrl = mockAuthorizationUrl;
 			this.callback = mockCallback;
 			this.userinfo = vi.fn().mockResolvedValue({});
+			this.revoke = mockRevoke;
+			this.refresh = mockRefresh;
 			this.issuer = { metadata: {} };
 		}
 	}
@@ -187,6 +199,10 @@ describe('OpenIDAuthDriver', () => {
 				scope: 'openid profile email',
 			}
 		);
+
+		vi.spyOn(service, 'getUserService').mockReturnValue({
+			updateOne: mockUpdateOne,
+		} as any);
 	});
 
 	afterEach(() => {
@@ -326,6 +342,44 @@ describe('OpenIDAuthDriver', () => {
 			// When no refresh_token, auth_data should be falsy.
 			// The baseoauth.ts ?? null fix handles coercing this to null for Knex.
 			expect(userPayload.auth_data).toBeFalsy();
+		});
+	});
+
+	describe('logout', () => {
+		const mockUser = {
+			id: 'user-123',
+			auth_data: JSON.stringify({ refreshToken: 'mock-refresh-token' }),
+		} as any;
+
+		it('revokes token when provider has revocation_endpoint', async () => {
+			const client = await service.client;
+			client.issuer.metadata.revocation_endpoint = 'https://provider.example.com/revoke';
+
+			await service.logout(mockUser);
+
+			expect(mockRefresh).toHaveBeenCalledWith('mock-refresh-token');
+			expect(mockRevoke).toHaveBeenCalledWith('mock-new-refresh-token', 'refresh_token');
+			expect(mockUpdateOne).toHaveBeenCalledWith('user-123', { auth_data: null });
+		});
+
+		it('skips revocation when provider has no revocation_endpoint', async () => {
+			const client = await service.client;
+			delete client.issuer.metadata.revocation_endpoint;
+
+			await service.logout(mockUser);
+
+			expect(mockRefresh).toHaveBeenCalledWith('mock-refresh-token');
+			expect(mockRevoke).not.toHaveBeenCalled();
+			expect(mockUpdateOne).toHaveBeenCalledWith('user-123', { auth_data: null });
+		});
+
+		it('clears auth_data even when refresh returns no new token', async () => {
+			mockRefresh.mockResolvedValueOnce({ refresh_token: undefined });
+
+			await service.logout(mockUser);
+
+			expect(mockRevoke).not.toHaveBeenCalled();
+			expect(mockUpdateOne).toHaveBeenCalledWith('user-123', { auth_data: null });
 		});
 	});
 });

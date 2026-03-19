@@ -147,7 +147,7 @@ export abstract class BaseOAuthDriver extends LocalAuthDriver {
 				const client = await this.getClient();
 				const tokenSet = await client.refresh(authData['refreshToken']);
 
-				if (tokenSet.refresh_token) {
+				if (tokenSet.refresh_token && client.issuer.metadata.revocation_endpoint) {
 					await client.revoke(tokenSet.refresh_token, 'refresh_token');
 				}
 
